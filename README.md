@@ -19,6 +19,7 @@
 - **测试连接**：保存前先探测 TCP 耗时、握手耗时、延迟与服务器版本
 - **常驻托盘**：最小化或关闭窗口都会缩到右下角托盘，代理继续在后台静默运行
 - **托盘菜单**：右键托盘图标即可打开界面 / 连接 / 断开 / 退出，无需打开窗口
+- **全局单实例**：双击多少次都只有一个进程，后启动的会自动退出并把已有窗口唤到前台
 
 ![配置弹窗](docs/dialog.png)
 
@@ -39,6 +40,20 @@
 - 托盘图标鼠标悬停会显示当前状态，例如「已连接 root@192.168.1.10」
 - **退出程序**：右键托盘图标 → 退出（所有监听端口随之释放）
 - 从终端启动时会挂到父控制台，日志照常打印；双击启动时没有任何控制台窗口，直接出界面
+
+### 全局单实例
+
+无论双击多少次 exe，系统里始终只有一个 `ssh-proxy.exe` 进程，不会出现「两个进程抢同一个代理端口」的情况。
+
+- **用内核命名互斥体判定**（`Global\SSHProxy.SingleInstance`，无权限时退回 `Local\`）。
+  `CreateMutexW` 是原子的，两个进程同时启动也只有一个能拿到；进程被强杀时由系统自动释放，
+  不会像锁文件那样留下「僵尸锁」导致再也打不开。
+- **后启动的实例只做一件事**：找到正在运行的那个实例的地址
+  （先读 `%AppData%\SSHProxy\instance.json`，再试默认端口，最后扫 7777~7790），
+  把它的窗口 `SW_RESTORE` 拉出托盘并置前，然后自己立刻退出（实测约 100ms）。
+  所以「窗口已经缩到托盘 → 又双击了一次 exe」的效果就是窗口重新弹回来。
+- **双保险**：互斥体之外还会用 `GET /api/meta` 探测是否已有本程序在服务，
+  这样从旧版本（没有互斥体）升级过来的瞬间也不会同时跑两个实例。
 
 ### 命令行参数
 
@@ -134,7 +149,7 @@ go run ./tools/mkico --png assets/icon-256.png web          # 导出网页 favic
 go run github.com/tc-hib/go-winres@latest simply ^
   --arch amd64 --icon build/app.ico --manifest gui ^
   --product-name "SSH Proxy" --file-description "SSH 代理工具（图形界面）" ^
-  --file-version 1.1.1.0 --product-version 1.1.1.0 ^
+  --file-version 1.1.2.0 --product-version 1.1.2.0 ^
   --original-filename ssh-proxy.exe --out rsrc               # 生成 syso
 go build -ldflags "-H windowsgui -s -w" -o ssh-proxy.exe .    # 重新编译（GUI 子系统，无黑窗）
 go run ./tools/checkicon ssh-proxy.exe                       # 校验资源是否嵌入
@@ -162,3 +177,5 @@ go run ./tools/checkicon ssh-proxy.exe                       # 校验资源是�
 - 错误密码失败提示、断开后端口释放、服务端重启后自动重连
 - 150% 缩放（3840×2160 / DPI 144）下任务栏图标按 36px 原生渲染，与 Chrome、微信同等清晰
 - 双击启动无控制台窗口；最小化 / 关闭窗口后缩到托盘，隧道继续运行
+- 连续启动 4 次只保留 1 个进程，后 3 次均在 ~100ms 内退出；强杀后互斥体自动释放，可正常再启动
+- 窗口已缩到托盘时再次双击 exe，原窗口被恢复可见并置前，界面进程数不增加（不会开出第二个窗口）

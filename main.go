@@ -8,6 +8,7 @@ package main
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -33,10 +34,13 @@ var embeddedWeb embed.FS
 //go:embed build/app.ico
 var appIconICO []byte
 
-var version = "1.1.1"
+var version = "1.1.2"
 
 // winTitle 必须与网页 <title> 完全一致，用于找到并接管应用窗口。
 const winTitle = "SSH Proxy · SSH 代理工具"
+
+// instanceMutex 是全局单实例锁的名字（winapp 内部会加 Global\/Local\ 前缀）。
+const instanceMutex = "SSHProxy.SingleInstance"
 
 var (
 	appURL  string
@@ -73,8 +77,17 @@ func main() {
 	initLog()
 	appMgr = sshx.New(st)
 
-	// 已有实例在运行时，直接唤起它的窗口
-	if url, ok := detectRunning(*addr); ok {
+	// 全局只允许一个实例。
+	// 互斥体是原子的：两个进程同时启动也只有一个能拿到；进程被强杀时系统自动释放，不留僵尸锁。
+	if !winapp.AcquireSingleInstance(instanceMutex) {
+		appLog.Printf("已有实例在运行，本次启动只负责把它的窗口唤到前台")
+		focusRunning(*addr, *noBrowser)
+		return
+	}
+
+	// 双保险：旧版本没有互斥体，这里再用 HTTP 探测兜底，避免升级期出现两个实例。
+	if url, ok := findRunningInstance(*addr); ok {
+		appLog.Printf("检测到已在运行的实例 %s，本次启动只负责唤起窗口", url)
 		appURL = url
 		if !*noBrowser {
 			openUI(url)
@@ -87,6 +100,7 @@ func main() {
 		fatal("端口监听失败: %v", err)
 	}
 	appURL = "http://" + actual
+	writeInstanceState(actual)
 
 	// 双击启动时隐藏自带的控制台窗口，实现后台静默运行
 	winapp.HideOwnConsole()
@@ -116,6 +130,7 @@ func main() {
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		fatal("服务异常退出: %v", err)
 	}
+	removeInstanceState()
 }
 
 /* ---------------- 托盘 ---------------- */
@@ -193,32 +208,113 @@ func toggleConnection() {
 func shutdown() {
 	_ = appMgr.Disconnect()
 	winapp.Quit()
+	removeInstanceState()
 	time.Sleep(200 * time.Millisecond)
 	os.Exit(0)
 }
 
-/* ---------------- 启动辅助 ---------------- */
+/* ---------------- 单实例 ---------------- */
 
-// detectRunning 探测指定地址上是否已经有本程序的实例在运行。
-func detectRunning(addr string) (string, bool) {
-	url := "http://" + addr
+// instanceState 记录当前实例的监听地址，供"第二次启动"找回它。
+type instanceState struct {
+	PID  int    `json:"pid"`
+	Addr string `json:"addr"`
+}
+
+func instanceFilePath() string { return filepath.Join(dataDir, "instance.json") }
+
+func writeInstanceState(addr string) {
+	b, err := json.Marshal(instanceState{PID: os.Getpid(), Addr: addr})
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(instanceFilePath(), b, 0o644); err != nil {
+		appLog.Printf("写入实例信息失败: %v", err)
+	}
+}
+
+func removeInstanceState() {
+	if dataDir == "" {
+		return // 还没确定数据目录（启动早期出错），别乱删当前目录下的同名文件
+	}
+	_ = os.Remove(instanceFilePath())
+}
+
+func readInstanceState() (instanceState, bool) {
+	var s instanceState
+	b, err := os.ReadFile(instanceFilePath())
+	if err != nil {
+		return s, false
+	}
+	if err := json.Unmarshal(b, &s); err != nil || s.Addr == "" {
+		return s, false
+	}
+	return s, true
+}
+
+// probeInstance 判断某个地址上跑的是不是本程序。
+func probeInstance(url string) bool {
 	client := &http.Client{Timeout: 800 * time.Millisecond}
 	resp, err := client.Get(url + "/api/meta")
 	if err != nil {
-		return "", false
+		return false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", false
+		return false
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 512))
 	if err != nil {
-		return "", false
+		return false
 	}
-	if strings.Contains(string(b), `"version"`) && strings.Contains(string(b), `"dataDir"`) {
-		return url, true
+	return strings.Contains(string(b), `"version"`) && strings.Contains(string(b), `"dataDir"`)
+}
+
+// findRunningInstance 找出正在运行的那个实例的地址。
+// 先看上次写下的 instance.json（端口可能已顺延到 7778~7790），再逐个端口探测。
+func findRunningInstance(defaultAddr string) (string, bool) {
+	if s, ok := readInstanceState(); ok {
+		if u := "http://" + s.Addr; probeInstance(u) {
+			return u, true
+		}
+	}
+	if u := "http://" + defaultAddr; probeInstance(u) {
+		return u, true
+	}
+	host, _, err := net.SplitHostPort(defaultAddr)
+	if err != nil {
+		host = "127.0.0.1"
+	}
+	for port := 7777; port <= 7790; port++ {
+		u := "http://" + net.JoinHostPort(host, fmt.Sprint(port))
+		if u == "http://"+defaultAddr {
+			continue
+		}
+		if probeInstance(u) {
+			return u, true
+		}
 	}
 	return "", false
+}
+
+// focusRunning 把已运行实例的窗口唤到前台（窗口在托盘里也能拉出来）。
+func focusRunning(defaultAddr string, noBrowser bool) {
+	if noBrowser {
+		return
+	}
+	url, ok := findRunningInstance(defaultAddr)
+	if !ok {
+		// 锁被占着但探测不到服务，说明对方正在启动或已卡死，等它一会儿
+		for i := 0; i < 10 && !ok; i++ {
+			time.Sleep(300 * time.Millisecond)
+			url, ok = findRunningInstance(defaultAddr)
+		}
+	}
+	if !ok {
+		return
+	}
+	appURL = url
+	openUI(url)
 }
 
 // listen 依次尝试候选端口，返回实际监听地址。
@@ -346,6 +442,7 @@ func fatal(format string, args ...any) {
 		appLog.Printf("[错误] %s", msg)
 	}
 	fmt.Fprintf(os.Stderr, "\n  [错误] %s\n\n", msg)
+	removeInstanceState()
 	winapp.MessageBox("SSH Proxy 启动失败", msg)
 	os.Exit(1)
 }
