@@ -9,13 +9,21 @@ import (
 	"image"
 	"image/png"
 	"os"
+	"path/filepath"
 )
 
 var sizes = []int{16, 24, 32, 48, 64, 128, 256}
 
 func main() {
+	// 用法：mkico <src.png> <dst.ico>
+	//       mkico --png <src.png> <输出目录>   把各尺寸导出为 PNG（网页 favicon 用）
+	if len(os.Args) >= 4 && os.Args[1] == "--png" {
+		dumpPNGs(os.Args[2], os.Args[3])
+		return
+	}
 	if len(os.Args) < 3 {
 		fmt.Println("用法: mkico <src.png> <dst.ico>")
+		fmt.Println("      mkico --png <src.png> <输出目录>")
 		os.Exit(1)
 	}
 	src := os.Args[1]
@@ -64,12 +72,12 @@ func main() {
 		if e.size >= 256 {
 			w = 0
 		}
-		out.WriteByte(w)          // width
-		out.WriteByte(w)          // height
-		out.WriteByte(0)          // palette
-		out.WriteByte(0)          // reserved
-		_ = binary.Write(&out, binary.LittleEndian, uint16(1))    // planes
-		_ = binary.Write(&out, binary.LittleEndian, uint16(32))   // bpp
+		out.WriteByte(w)                                        // width
+		out.WriteByte(w)                                        // height
+		out.WriteByte(0)                                        // palette
+		out.WriteByte(0)                                        // reserved
+		_ = binary.Write(&out, binary.LittleEndian, uint16(1))  // planes
+		_ = binary.Write(&out, binary.LittleEndian, uint16(32)) // bpp
 		_ = binary.Write(&out, binary.LittleEndian, uint32(len(e.data)))
 		_ = binary.Write(&out, binary.LittleEndian, uint32(offset))
 		offset += len(e.data)
@@ -82,6 +90,36 @@ func main() {
 		panic(err)
 	}
 	fmt.Printf("已生成 %s（%d 个尺寸，共 %d 字节）\n", dst, len(entries), out.Len())
+}
+
+// dumpPNGs 把源图按 favicon 常用尺寸导出为 PNG。
+func dumpPNGs(src, outDir string) {
+	f, err := os.Open(src)
+	if err != nil {
+		panic(err)
+	}
+	img, err := png.Decode(f)
+	f.Close()
+	if err != nil {
+		panic(err)
+	}
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		panic(err)
+	}
+	for _, s := range []int{16, 32, 48, 64, 128} {
+		small := resize(img, s)
+		name := filepath.Join(outDir, fmt.Sprintf("favicon-%d.png", s))
+		out, err := os.Create(name)
+		if err != nil {
+			panic(err)
+		}
+		if err := png.Encode(out, small); err != nil {
+			out.Close()
+			panic(err)
+		}
+		out.Close()
+		fmt.Println("已生成", name)
+	}
 }
 
 // resize 使用面积平均（box filter）缩放，缩小时不易出现锯齿。

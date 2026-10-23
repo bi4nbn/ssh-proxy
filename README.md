@@ -17,18 +17,28 @@
 - **主机指纹校验**：首次连接记录 SHA256 指纹，可开启「严格校验」，指纹变化会拒绝连接
 - **配置管理**：多套配置保存到本地，支持搜索、编辑、删除、双击快速编辑
 - **测试连接**：保存前先探测 TCP 耗时、握手耗时、延迟与服务器版本
+- **常驻托盘**：最小化或关闭窗口都会缩到右下角托盘，代理继续在后台静默运行
+- **托盘菜单**：右键托盘图标即可打开界面 / 连接 / 断开 / 退出，无需打开窗口
 
 ![配置弹窗](docs/dialog.png)
 
 ## 快速开始
 
 1. 双击 `ssh-proxy.exe`
-2. 程序会在本机启动服务并自动打开应用窗口（Chrome/Edge 应用模式，看起来就是一个独立窗口）
+2. 程序会在本机启动服务、挂上托盘图标，并打开应用窗口（Chrome/Edge 应用模式，看起来就是一个独立窗口）
 3. 点击左下角 **新建连接**，填写主机、端口、用户名、密码或私钥
 4. 保存后点击右上角圆形按钮 **连接**
 
 > 默认地址 `http://127.0.0.1:7777`，端口被占用时会自动顺延（7778~7790）。
-> 关闭黑色命令行窗口即退出程序（所有监听端口随之释放）。
+> 重复双击 exe 不会启动第二个实例，只会把已运行的窗口唤到前台。
+
+### 托盘与后台运行
+
+- 点窗口的 **最小化** 或 **关闭**，窗口都会收进右下角托盘，SSH 隧道和本地代理继续工作
+- 单击 / 双击托盘图标 → 重新打开界面；右键 → 菜单（打开界面 / 连接 / 断开 / 退出）
+- 托盘图标鼠标悬停会显示当前状态，例如「已连接 root@192.168.1.10」
+- **退出程序**：右键托盘图标 → 退出（所有监听端口随之释放）
+- 从终端启动时会保留控制台窗口方便看日志；双击启动时自动隐藏，做到后台静默运行
 
 ### 命令行参数
 
@@ -88,6 +98,7 @@ internal/store/             配置与主机指纹持久化
 internal/sshx/              SSH 连接管理、统计、重连、端口转发
 internal/socks/             SOCKS5 服务端（仅 CONNECT，无认证）
 internal/api/               HTTP 接口 + SSE 实时推送 + 静态资源
+internal/winapp/            Win32 外壳：系统托盘、窗口图标接管、最小化到托盘
 web/                        界面（原生 HTML/CSS/JS，编译时内嵌进 exe）
 assets/icon-256.png         图标源图
 build/app.ico               生成的多尺寸图标
@@ -114,6 +125,7 @@ exe 的图标由 `rsrc_windows_amd64.syso`（Windows 资源对象文件）提供
 
 ```bash
 go run ./tools/mkico assets/icon-256.png build/app.ico      # 生成多尺寸 ico
+go run ./tools/mkico --png assets/icon-256.png web          # 导出网页 favicon
 go run github.com/tc-hib/go-winres@latest simply ^
   --arch amd64 --icon build/app.ico --manifest gui ^
   --product-name "SSH Proxy" --file-description "SSH 代理工具（图形界面）" ^
@@ -123,7 +135,9 @@ go build -o ssh-proxy.exe .                                 # 重新编译
 go run ./tools/checkicon ssh-proxy.exe                      # 校验资源是否嵌入
 ```
 
-网页窗口的标题栏图标取 `web/icon.png`（同一个源图）。
+应用窗口本身是 Chrome/Edge 的 app 窗口，默认会用网页 favicon 当图标（缩放到任务栏尺寸会发虚）。
+程序启动后会把窗口图标 **接管** 成 exe 内嵌的多尺寸 ICO（`WM_SETICON`），任务栏、Alt+Tab 都是清晰的图标；
+同时 `web/` 下也导出了 16/32/48/64/128 多档 favicon 作为兜底。
 
 ## 已验证场景
 

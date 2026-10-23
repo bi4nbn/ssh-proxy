@@ -751,5 +751,15 @@ func (m *Manager) Trust(addr string) error {
 // Forget 清除主机指纹。
 func (m *Manager) Forget(addr string) error { return m.st.ForgetHost(addr) }
 
+// CurrentProfileID 返回最近一次使用（或正在使用）的配置 ID。
+func (m *Manager) CurrentProfileID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.prof != nil {
+		return m.prof.ID
+	}
+	return ""
+}
+
 // Store 暴露底层存储。
 func (m *Manager) Store() *store.Store { return m.st }
