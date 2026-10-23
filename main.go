@@ -34,7 +34,7 @@ var embeddedWeb embed.FS
 //go:embed build/app.ico
 var appIconICO []byte
 
-var version = "1.1.2"
+var version = "1.1.3"
 
 // winTitle 必须与网页 <title> 完全一致，用于找到并接管应用窗口。
 const winTitle = "SSH Proxy · SSH 代理工具"
@@ -169,6 +169,7 @@ func trayMenu() []winapp.MenuItem {
 }
 
 func onTrayCommand(id int) {
+	appLog.Printf("托盘菜单命令: id=%d", id)
 	switch id {
 	case winapp.CmdOpen:
 		openUI(appURL)
@@ -176,6 +177,8 @@ func onTrayCommand(id int) {
 		toggleConnection()
 	case winapp.CmdQuit:
 		shutdown()
+	default:
+		appLog.Printf("未识别的托盘命令 id=%d，已忽略", id)
 	}
 }
 
@@ -205,11 +208,55 @@ func toggleConnection() {
 	}
 }
 
+// shutdown 退出程序。
+//
+// 这里每一步都不能假设一定成功：断开 SSH 可能因为对端不响应而卡在 Close 上，
+// 移除托盘图标可能因为 Explorer 忙而卡在 Shell_NotifyIcon 上。只要卡住一步，
+// 后面的 os.Exit 就永远执行不到，表现就是"点了退出，进程还在"。
+// 所以每一步都带超时，另外再挂一个 3 秒看门狗兜底：时间一到无条件退出。
+// 进程退出时操作系统会回收全部 socket，本地监听端口不会残留。
 func shutdown() {
-	_ = appMgr.Disconnect()
-	winapp.Quit()
+	if appLog != nil {
+		appLog.Printf("收到退出请求，正在退出…")
+	}
+
+	// 看门狗：清理动作再慢，也不让进程赖着不走
+	go func() {
+		time.Sleep(3 * time.Second)
+		os.Exit(0)
+	}()
+
+	// 先摘托盘图标，让用户立刻看到"退出了"
+	quitDone := make(chan struct{})
+	go func() {
+		winapp.Quit()
+		close(quitDone)
+	}()
+	select {
+	case <-quitDone:
+	case <-time.After(800 * time.Millisecond):
+		if appLog != nil {
+			appLog.Printf("移除托盘图标超时，跳过")
+		}
+	}
+
+	// 再优雅断开，最多等 1.5 秒
+	if appMgr != nil {
+		disDone := make(chan struct{})
+		go func() {
+			_ = appMgr.Disconnect()
+			close(disDone)
+		}()
+		select {
+		case <-disDone:
+		case <-time.After(1500 * time.Millisecond):
+			if appLog != nil {
+				appLog.Printf("断开连接超时，直接退出（端口随进程释放）")
+			}
+		}
+	}
+
 	removeInstanceState()
-	time.Sleep(200 * time.Millisecond)
 	os.Exit(0)
 }
 

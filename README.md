@@ -41,6 +41,15 @@
 - **退出程序**：右键托盘图标 → 退出（所有监听端口随之释放）
 - 从终端启动时会挂到父控制台，日志照常打印；双击启动时没有任何控制台窗口，直接出界面
 
+> **找不到托盘图标？** Windows 11 默认把新图标折叠进任务栏的 `^` 展开区。
+> 点 `^` 找到 SSH Proxy 图标后，用鼠标把它拖到任务栏上即可常驻显示。
+
+> **关于退出**：托盘「退出」会真正结束进程。清理步骤（移除图标、断开 SSH）都带超时，
+> 另有一个 3 秒看门狗兜底，任何一步卡住都不会让进程赖着不走；
+> 进程退出时操作系统回收全部 socket，本地监听端口随之释放。
+> 如果点了退出发现图标还在，通常是 Explorer 的图标缓存没刷新（鼠标划过该区域即消失），
+> 可以用任务管理器确认 `ssh-proxy.exe` 是否真的还在运行。
+
 ### 全局单实例
 
 无论双击多少次 exe，系统里始终只有一个 `ssh-proxy.exe` 进程，不会出现「两个进程抢同一个代理端口」的情况。
@@ -149,7 +158,7 @@ go run ./tools/mkico --png assets/icon-256.png web          # 导出网页 favic
 go run github.com/tc-hib/go-winres@latest simply ^
   --arch amd64 --icon build/app.ico --manifest gui ^
   --product-name "SSH Proxy" --file-description "SSH 代理工具（图形界面）" ^
-  --file-version 1.1.2.0 --product-version 1.1.2.0 ^
+  --file-version 1.1.3.0 --product-version 1.1.3.0 ^
   --original-filename ssh-proxy.exe --out rsrc               # 生成 syso
 go build -ldflags "-H windowsgui -s -w" -o ssh-proxy.exe .    # 重新编译（GUI 子系统，无黑窗）
 go run ./tools/checkicon ssh-proxy.exe                       # 校验资源是否嵌入
