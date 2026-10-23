@@ -344,7 +344,7 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
 .paste-key textarea { width: 100%; margin-top: 10px; font-family: var(--mono); font-size: 11.5px; resize: vertical; }
 .paste-key .tip { font-size: 11.5px; color: var(--muted); margin: 6px 0 0; }
 
-.switch-row { display: flex; align-items: center; gap: 10px; cursor: pointer; flex: 1; }
+.switch-row { display: flex; align-items: center; gap: 10px; cursor: pointer; flex: 1; padding-bottom: 9px; }
 .switch-row input { display: none; }
 .switch-row .track {
   width: 40px; height: 22px; border-radius: 22px; background: #d7dbe6;
