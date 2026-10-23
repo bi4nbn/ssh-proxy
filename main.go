@@ -41,6 +41,7 @@ const winTitle = "SSH Proxy · SSH 代理工具"
 var (
 	appURL  string
 	appLog  *log.Logger
+	console io.Writer = io.Discard // 异步的控制台输出，避免 CONOUT$ 阻塞主流程
 	appMgr  *sshx.Manager
 	dataDir string
 )
@@ -251,27 +252,56 @@ func ensureIconFile(dir string) string {
 	return path
 }
 
+// asyncWriter 把日志异步写到控制台。
+// 双击启动时 os.Stdout 指向的 CONOUT$ 可能没有读者，缓冲区写满后 Write 会一直阻塞，
+// 而 log.Logger 内部有锁——一旦卡住，整个程序的日志（以及调用它的协程）都会停摆。
+type asyncWriter struct {
+	ch chan []byte
+}
+
+func newAsyncWriter(w io.Writer) *asyncWriter {
+	a := &asyncWriter{ch: make(chan []byte, 256)}
+	go func() {
+		for b := range a.ch {
+			_, _ = w.Write(b)
+		}
+	}()
+	return a
+}
+
+func (a *asyncWriter) Write(p []byte) (int, error) {
+	b := make([]byte, len(p))
+	copy(b, p)
+	select {
+	case a.ch <- b:
+	default: // 队列满就丢弃，绝不阻塞业务协程
+	}
+	return len(p), nil
+}
+
 func initLog() {
+	console = newAsyncWriter(os.Stdout)
 	f, err := os.OpenFile(filepath.Join(dataDir, "app.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		appLog = log.New(io.Discard, "", 0)
+		appLog = log.New(console, "", log.LstdFlags)
 		return
 	}
-	appLog = log.New(io.MultiWriter(os.Stdout, f), "", log.LstdFlags)
+	appLog = log.New(io.MultiWriter(f, console), "", log.LstdFlags)
 }
 
 func printBanner(url, dir string) {
 	line := strings.Repeat("─", 56)
-	fmt.Println()
-	fmt.Println("  " + line)
-	fmt.Printf("   SSH Proxy %s   已启动\n", version)
-	fmt.Println("  " + line)
-	fmt.Printf("   界面地址 : %s\n", url)
-	fmt.Printf("   数据目录 : %s\n", dir)
-	fmt.Println("   最小化 / 关闭窗口后缩到右下角托盘继续运行")
-	fmt.Println("   退出请右键点击托盘图标 -> 退出")
-	fmt.Println("  " + line)
-	fmt.Println()
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString("  " + line + "\n")
+	fmt.Fprintf(&b, "   SSH Proxy %s   已启动\n", version)
+	b.WriteString("  " + line + "\n")
+	fmt.Fprintf(&b, "   界面地址 : %s\n", url)
+	fmt.Fprintf(&b, "   数据目录 : %s\n", dir)
+	b.WriteString("   最小化 / 关闭窗口后缩到右下角托盘继续运行\n")
+	b.WriteString("   退出请右键点击托盘图标 -> 退出\n")
+	b.WriteString("  " + line + "\n\n")
+	_, _ = io.WriteString(console, b.String())
 }
 
 // openUI 优先唤起已存在的窗口，其次用 Edge/Chrome 的应用模式新开一个。
