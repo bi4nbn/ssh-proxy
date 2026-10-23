@@ -1,0 +1,16 @@
+# 编译产物
+/ssh-proxy.exe
+/*.exe
+/*.exe~
+*.syso.tmp
+
+# 本地临时文件（截图缓存、测试服务、配置备份等）
+/.tmp/
+
+# 工具/助手的工作目录（含本地笔记，不参与版本管理）
+/.workbuddy-ai/
+
+# 系统文件
+Thumbs.db
+.DS_Store
+desktop.ini

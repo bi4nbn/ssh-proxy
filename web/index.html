@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SSH Proxy · SSH 代理工具</title>
+<link rel="icon" type="image/png" href="icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ============ 侧边栏 ============ -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="3"></rect>
+          <path d="M6 9l3 3-3 3"></path><path d="M12 15h5"></path>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1>SSH Proxy</h1>
+        <span>安全隧道 · 本地代理</span>
+      </div>
+    </div>
+
+    <div class="search-box">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input id="search" type="text" placeholder="搜索配置…" autocomplete="off">
+    </div>
+
+    <div class="list-label">连接配置 <span id="profileCount">0</span></div>
+    <div class="profile-list" id="profileList"></div>
+
+    <button class="btn-new" id="btnNew">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      新建连接
+    </button>
+
+    <div class="sidebar-foot">
+      <div class="foot-row"><span>数据目录</span><code id="dataDir">—</code></div>
+      <div class="foot-row"><span>版本</span><code>v1.0.0</code></div>
+    </div>
+  </aside>
+
+  <!-- ============ 主区域 ============ -->
+  <main class="main">
+
+    <header class="conn-card">
+      <div class="conn-left">
+        <div class="status-pill" id="statusPill">
+          <span class="pulse" id="statusDot"></span>
+          <span id="statusText">未连接</span>
+        </div>
+        <h2 id="connName">未选择配置</h2>
+        <p class="conn-sub" id="connAddr">从左侧选择一个配置，或新建一个 SSH 连接</p>
+        <div class="badges" id="badges"></div>
+      </div>
+      <div class="conn-right">
+        <button class="power" id="btnToggle" title="连接 / 断开">
+          <svg class="ico-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M12 3v9"/><path d="M6.4 6.4a8 8 0 1 0 11.2 0"/>
+          </svg>
+          <span id="btnToggleText">连接</span>
+        </button>
+      </div>
+    </header>
+
+    <section class="stats">
+      <div class="stat">
+        <div class="stat-label">在线时长</div>
+        <div class="stat-value" id="statUptime">00:00:00</div>
+        <div class="stat-hint" id="statSince">尚未建立连接</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">往返延迟</div>
+        <div class="stat-value" id="statLatency">—<small>ms</small></div>
+        <div class="stat-bar"><i id="latencyBar" style="width:0%"></i></div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">下行 / 上行</div>
+        <div class="stat-value small" id="statTraffic">0 B / 0 B</div>
+        <div class="stat-hint" id="statRate">实时流量统计</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">本地代理</div>
+        <div class="stat-value small mono" id="statSocks">—</div>
+        <div class="stat-hint" id="statSocksHint">SOCKS5 未启动</div>
+      </div>
+    </section>
+
+    <section class="panels">
+      <div class="card">
+        <div class="card-head">
+          <h3>代理与转发</h3>
+          <button class="link" id="btnCopySocks">复制地址</button>
+        </div>
+        <div class="kv">
+          <span>SOCKS5</span>
+          <code id="proxySocks">—</code>
+        </div>
+        <div class="fwd-list" id="fwdList">
+          <div class="empty-hint">未配置端口转发</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3>连接详情</h3>
+          <button class="link" id="btnTrust" style="display:none">信任此主机</button>
+        </div>
+        <div class="kv"><span>认证方式</span><code id="detailAuth">—</code></div>
+        <div class="kv"><span>主机指纹</span><code class="fingerprint" id="detailFp">—</code></div>
+        <div class="kv"><span>重试次数</span><code id="detailAttempt">0</code></div>
+        <div class="kv"><span>最近错误</span><code class="err-text" id="detailErr">—</code></div>
+      </div>
+    </section>
+
+    <section class="card logs">
+      <div class="card-head">
+        <h3>实时日志</h3>
+        <div class="log-tools">
+          <label class="mini-check"><input type="checkbox" id="autoScroll" checked><span>自动滚动</span></label>
+          <button class="link" id="btnClearLogs">清空</button>
+        </div>
+      </div>
+      <div class="log-body" id="logBody"></div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ============ 配置弹窗 ============ -->
+<div class="overlay" id="overlay">
+  <div class="dialog" role="dialog" aria-modal="true">
+    <div class="dialog-head">
+      <h3 id="dialogTitle">新建连接</h3>
+      <button class="icon-btn" id="btnCloseDialog" title="关闭">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <div class="dialog-body">
+      <div class="section-title">基本信息</div>
+      <div class="grid-2">
+        <label class="field"><span>配置名称</span><input id="f-name" placeholder="例如：生产跳板机"></label>
+        <label class="field"><span>用户名</span><input id="f-user" placeholder="root" autocomplete="off"></label>
+        <label class="field"><span>主机地址</span><input id="f-host" placeholder="192.168.1.10 或 example.com" autocomplete="off"></label>
+        <label class="field"><span>端口</span><input id="f-port" type="number" min="1" max="65535" value="22"></label>
+      </div>
+
+      <div class="section-title">身份认证</div>
+      <div class="seg" id="authSeg">
+        <button type="button" data-value="password">密码</button>
+        <button type="button" data-value="key">私钥证书</button>
+        <button type="button" data-value="both">密码 + 私钥</button>
+      </div>
+
+      <div id="pwdGroup" class="grid-1">
+        <label class="field"><span>密码</span>
+          <div class="input-with-btn">
+            <input id="f-password" type="password" placeholder="登录密码" autocomplete="new-password">
+            <button type="button" class="eye" id="btnEye">显示</button>
+          </div>
+        </label>
+      </div>
+
+      <div id="keyGroup" class="grid-1" style="display:none">
+        <label class="field"><span>私钥文件</span>
+          <div class="input-with-btn">
+            <input id="f-keypath" placeholder="C:\Users\you\.ssh\id_rsa" autocomplete="off">
+            <button type="button" class="pick" id="btnPickKey">浏览…</button>
+          </div>
+        </label>
+        <div class="row-inline">
+          <label class="field grow"><span>私钥口令（可选）</span><input id="f-passphrase" type="password" placeholder="加密私钥的 passphrase"></label>
+          <label class="field grow"><span>快速选择</span>
+            <select id="f-keylist"><option value="">扫描 ~/.ssh …</option></select>
+          </label>
+        </div>
+        <details class="paste-key">
+          <summary>或直接粘贴私钥内容</summary>
+          <textarea id="f-keydata" rows="5" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;…"></textarea>
+          <p class="tip">粘贴后会保存到本地数据目录，权限 600。</p>
+        </details>
+      </div>
+
+      <div class="section-title">本地代理</div>
+      <div class="row-inline">
+        <label class="switch-row">
+          <input type="checkbox" id="f-socks" checked>
+          <span class="track"></span>
+          <span class="switch-text">启用 SOCKS5 代理</span>
+        </label>
+        <label class="field" style="width:160px"><span>本地端口</span><input id="f-socksport" type="number" min="1" max="65535" value="1080"></label>
+      </div>
+
+      <div class="section-title">端口转发
+        <button type="button" class="link add" id="btnAddFwd">+ 添加规则</button>
+      </div>
+      <div class="fwd-editor" id="fwdEditor"></div>
+
+      <div class="section-title">高级选项</div>
+      <div class="grid-2">
+        <label class="field"><span>心跳间隔（秒）</span><input id="f-keepalive" type="number" min="5" max="300" value="15"></label>
+        <label class="field"><span>连接超时（秒）</span><input id="f-timeout" type="number" min="3" max="120" value="15"></label>
+      </div>
+      <div class="row-inline checks">
+        <label class="check"><input type="checkbox" id="f-autoreconnect"><span>断线自动重连</span></label>
+        <label class="check"><input type="checkbox" id="f-strict"><span>严格校验主机密钥</span></label>
+      </div>
+
+      <div class="test-result" id="testResult"></div>
+    </div>
+
+    <div class="dialog-foot">
+      <button class="btn danger ghost" id="btnDelete" style="display:none">删除</button>
+      <div class="spacer"></div>
+      <button class="btn ghost" id="btnTest">测试连接</button>
+      <button class="btn ghost" id="btnCancel">取消</button>
+      <button class="btn primary" id="btnSave">保存</button>
+      <button class="btn primary solid" id="btnSaveConnect">保存并连接</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+<script src="app.js"></script>
+</body>
+</html>
