@@ -43,26 +43,30 @@ func findWindowByTitle(title string) syscall.Handle {
 	return enumFound
 }
 
-// applyIcon 把窗口图标换成我们自己的图标，解决任务栏图标模糊的问题
-// （网页窗口默认用 favicon，缩放到任务栏尺寸会发虚）。
+// applyIcon 把窗口图标换成我们自己的图标，解决任务栏图标模糊的问题。
+// 关键点：按窗口所在显示器的 DPI 算出任务栏真正要画的像素尺寸（150% 缩放时是 36px），
+// 直接喂一张同尺寸的图标，Windows 就不会再插值放大。
 func applyIcon(hwnd syscall.Handle) bool {
-	if trayIconBig != 0 {
-		procSendMessageW.Call(uintptr(hwnd), wmSetIcon, iconBig, uintptr(trayIconBig))
+	dpi := dpiFor(hwnd)
+	big := iconFor(taskbarIconPx(dpi))
+	small := iconFor(16 * dpi / 96)
+	if big != 0 {
+		procSendMessageW.Call(uintptr(hwnd), wmSetIcon, iconBig, uintptr(big))
 	}
-	if trayIconSm != 0 {
-		procSendMessageW.Call(uintptr(hwnd), wmSetIcon, iconSmall, uintptr(trayIconSm))
+	if small != 0 {
+		procSendMessageW.Call(uintptr(hwnd), wmSetIcon, iconSmall, uintptr(small))
 	}
 	got, _, _ := procSendMessageW.Call(uintptr(hwnd), wmGetIcon, iconBig, 0)
-	return got == uintptr(trayIconBig)
+	return got == uintptr(big)
 }
 
 // watchWindow 持续跟踪目标窗口：接管图标，并在用户点最小化时把窗口藏到托盘。
 func watchWindow() {
 	var hwnd syscall.Handle
-	var iconAt time.Time
 	wasVisible := false
 	hiddenAt := time.Time{}
 	iconLogged := false
+	reapplied := false
 
 	for {
 		if hwnd == 0 || !isWindow(hwnd) {
@@ -73,17 +77,21 @@ func watchWindow() {
 					iconLogged = true
 					trayOpts.Logf("已接管窗口图标 hwnd=%d 生效=%v", hwnd, ok)
 				}
-				iconAt = time.Now()
 				wasVisible = false
 			}
 			time.Sleep(300 * time.Millisecond)
 			continue
 		}
 
-		// 页面 favicon 可能会覆盖窗口图标，定期重新设置（不写日志，避免刷屏）
-		if time.Since(iconAt) > 5*time.Second {
+		// 页面加载完成后 Chrome 会用 favicon 覆盖窗口图标，
+		// 这里每秒校验一次，被覆盖就立刻抢回来（只在变化时写日志）
+		want := iconFor(taskbarIconPx(dpiFor(hwnd)))
+		if got, _, _ := procSendMessageW.Call(uintptr(hwnd), wmGetIcon, iconBig, 0); got != uintptr(want) {
 			applyIcon(hwnd)
-			iconAt = time.Now()
+			if trayOpts.Logf != nil && !reapplied {
+				reapplied = true
+				trayOpts.Logf("检测到窗口图标被覆盖，已重新接管")
+			}
 		}
 
 		visible := isWindowVisible(hwnd)

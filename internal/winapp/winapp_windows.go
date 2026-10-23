@@ -6,6 +6,7 @@ package winapp
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 	"sync"
 	"syscall"
@@ -17,6 +18,7 @@ var (
 	user32   = syscall.NewLazyDLL("user32.dll")
 	shell32  = syscall.NewLazyDLL("shell32.dll")
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
+	ntdll    = syscall.NewLazyDLL("ntdll.dll")
 
 	procRegisterClassExW  = user32.NewProc("RegisterClassExW")
 	procCreateWindowExW   = user32.NewProc("CreateWindowExW")
@@ -44,11 +46,19 @@ var (
 	procGetWindowTextW    = user32.NewProc("GetWindowTextW")
 	procGetWindowTextLen  = user32.NewProc("GetWindowTextLengthW")
 	procMessageBoxW       = user32.NewProc("MessageBoxW")
-	procGetSystemMetrics  = user32.NewProc("GetSystemMetrics")
+
+	// DPI 相关：不做 DPI 感知时，150% 缩放的系统上 GetSystemMetrics 会返回
+	// 虚拟化的 32px，导致我们准备的图标被 Windows 再放大一次而发虚。
+	procSetDpiCtx       = user32.NewProc("SetProcessDpiAwarenessContext")
+	procSetDpiAware     = user32.NewProc("SetProcessDPIAware")
+	procGetDpiForWindow = user32.NewProc("GetDpiForWindow")
+	procGetDpiForSystem = user32.NewProc("GetDpiForSystem")
+	procRtlGetVersion   = ntdll.NewProc("RtlGetVersion")
 
 	procGetConsoleWindow = kernel32.NewProc("GetConsoleWindow")
 	procGetConsolePids   = kernel32.NewProc("GetConsoleProcessList")
 	procGetModuleHandleW = kernel32.NewProc("GetModuleHandleW")
+	procAttachConsole    = kernel32.NewProc("AttachConsole")
 
 	procShellNotifyIcon = shell32.NewProc("Shell_NotifyIconW")
 )
@@ -97,9 +107,6 @@ const (
 	wmLButtonUp     = 0x0202
 	wmLButtonDblClk = 0x0203
 	wmRButtonUp     = 0x0205
-
-	smCxSmIcon = 49
-	smCySmIcon = 50
 )
 
 // 托盘菜单命令 ID
@@ -207,6 +214,86 @@ func HideOwnConsole() {
 	}
 }
 
+// AttachParentConsole 以 GUI 子系统编译时，从命令行启动会没有输出。
+// 这里尝试挂到父进程（cmd / PowerShell）的控制台上，让日志照常打印。
+func AttachParentConsole() bool {
+	const attachParentProcess = ^uintptr(0) // (DWORD)-1
+	r, _, _ := procAttachConsole.Call(attachParentProcess)
+	if r == 0 {
+		return false
+	}
+	if f, err := os.OpenFile("CONOUT$", os.O_WRONLY, 0); err == nil {
+		os.Stdout = f
+		os.Stderr = f
+	}
+	return true
+}
+
+// EnableDPIAwareness 开启每显示器 DPI 感知。
+// 不开启的话，在 125%/150% 缩放的系统上进程看到的是"虚拟化"的 96 DPI，
+// GetSystemMetrics 返回 32px，而我们准备 32px 图标后任务栏实际要画 36px，
+// Windows 只能再插值放大一次，图标就糊了。
+func EnableDPIAwareness() {
+	if procSetDpiCtx.Find() == nil {
+		// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+		if r, _, _ := procSetDpiCtx.Call(^uintptr(3)); r != 0 {
+			return
+		}
+	}
+	procSetDpiAware.Call()
+}
+
+type osVersionInfoExW struct {
+	OSVersionInfoSize uint32
+	MajorVersion      uint32
+	MinorVersion      uint32
+	BuildNumber       uint32
+	PlatformID        uint32
+	CSDVersion        [128]uint16
+}
+
+// winBuild 返回真实的 Windows 内部版本号（GetVersionEx 会被兼容性视图欺骗，故用 RtlGetVersion）。
+func winBuild() uint32 {
+	var vi osVersionInfoExW
+	vi.OSVersionInfoSize = uint32(unsafe.Sizeof(vi))
+	if r, _, _ := procRtlGetVersion.Call(uintptr(unsafe.Pointer(&vi))); r != 0 {
+		return 0
+	}
+	return vi.BuildNumber
+}
+
+// dpiFor 返回窗口所在显示器的 DPI（96 = 100%）。
+func dpiFor(hwnd syscall.Handle) int {
+	if hwnd != 0 && procGetDpiForWindow.Find() == nil {
+		if d, _, _ := procGetDpiForWindow.Call(uintptr(hwnd)); d != 0 {
+			return int(d)
+		}
+	}
+	if procGetDpiForSystem.Find() == nil {
+		if d, _, _ := procGetDpiForSystem.Call(); d != 0 {
+			return int(d)
+		}
+	}
+	return 96
+}
+
+// taskbarIconPx 返回任务栏按钮真正绘制图标的像素尺寸。
+// Win11 任务栏图标是 24 逻辑像素，Win10 是 32 逻辑像素，再按 DPI 换算成物理像素。
+func taskbarIconPx(dpi int) int {
+	logical := 24
+	if b := winBuild(); b != 0 && b < 22000 {
+		logical = 32
+	}
+	px := logical * dpi / 96
+	if px < 16 {
+		px = 16
+	}
+	if px > 256 {
+		px = 256
+	}
+	return px
+}
+
 // MessageBox 弹出系统提示框（无控制台时用于报错）。
 func MessageBox(title, text string) {
 	t, _ := syscall.UTF16PtrFromString(text)
@@ -222,6 +309,39 @@ func loadIcon(path string, cx, cy int32) syscall.Handle {
 	h, _, _ := procLoadImageW.Call(0, uintptr(unsafe.Pointer(p)), imageIcon,
 		uintptr(cx), uintptr(cy), lrLoadFromFile)
 	return syscall.Handle(h)
+}
+
+var (
+	iconCacheMu sync.Mutex
+	iconCache   = map[int]syscall.Handle{}
+)
+
+// iconFor 按目标物理像素尺寸加载图标。
+// ICO 里已经预置了 16~64 每一个整数尺寸，所以这里总能拿到"像素级完全一致"的图，
+// Windows 不会再插值缩放，任务栏/标题栏/托盘都能保持锐利。
+func iconFor(px int) syscall.Handle {
+	if px <= 0 || trayOpts.IconPath == "" {
+		return 0
+	}
+	iconCacheMu.Lock()
+	defer iconCacheMu.Unlock()
+	if h, ok := iconCache[px]; ok {
+		return h
+	}
+	h := loadIcon(trayOpts.IconPath, int32(px), int32(px))
+	iconCache[px] = h
+	return h
+}
+
+func destroyCachedIcons() {
+	iconCacheMu.Lock()
+	defer iconCacheMu.Unlock()
+	for px, h := range iconCache {
+		if h != 0 {
+			procDestroyIcon.Call(uintptr(h))
+		}
+		delete(iconCache, px)
+	}
 }
 
 // Start 初始化托盘图标并在独立线程上运行消息循环（非阻塞）。
@@ -275,13 +395,16 @@ func initTray() error {
 		taskbarMsg = uint32(r)
 	}
 
-	cx, _, _ := procGetSystemMetrics.Call(smCxSmIcon)
-	cy, _, _ := procGetSystemMetrics.Call(smCySmIcon)
-	trayIconSm = loadIcon(trayOpts.IconPath, int32(cx), int32(cy))
-	trayIconBig = loadIcon(trayOpts.IconPath, 32, 32)
+	// 按系统 DPI 实际需要的物理像素加载，避免 Windows 再缩放一次导致发虚
+	dpi := dpiFor(0)
+	smPx := 16 * dpi / 96
+	bigPx := taskbarIconPx(dpi)
+	trayIconSm = iconFor(smPx)
+	trayIconBig = iconFor(bigPx)
 	if trayIconSm == 0 {
 		return fmt.Errorf("加载托盘图标失败: %s", trayOpts.IconPath)
 	}
+	trayOpts.Logf("图标尺寸: DPI=%d 托盘=%dpx 任务栏=%dpx build=%d", dpi, smPx, bigPx, winBuild())
 
 	if err := addTrayIcon(); err != nil {
 		return err
@@ -472,11 +595,8 @@ func Quit() {
 		if trayHWnd != 0 {
 			procPostMessageW.Call(uintptr(trayHWnd), wmDestroy, 0, 0)
 		}
-		if trayIconSm != 0 {
-			procDestroyIcon.Call(uintptr(trayIconSm))
-		}
-		if trayIconBig != 0 {
-			procDestroyIcon.Call(uintptr(trayIconBig))
-		}
+		destroyCachedIcons()
+		trayIconSm = 0
+		trayIconBig = 0
 	})
 }

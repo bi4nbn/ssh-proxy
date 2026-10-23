@@ -33,7 +33,7 @@ var embeddedWeb embed.FS
 //go:embed build/app.ico
 var appIconICO []byte
 
-var version = "1.1.0"
+var version = "1.1.1"
 
 // winTitle 必须与网页 <title> 完全一致，用于找到并接管应用窗口。
 const winTitle = "SSH Proxy · SSH 代理工具"
@@ -52,6 +52,12 @@ func main() {
 		showVer   = flag.Bool("v", false, "显示版本号")
 	)
 	flag.Parse()
+
+	// 以 GUI 子系统编译（无控制台窗口）；从终端启动时挂到父控制台，日志照常输出
+	winapp.AttachParentConsole()
+
+	// 必须尽早开启：否则高 DPI 下取到的图标尺寸会被系统虚拟化，任务栏图标会被二次放大而发虚
+	winapp.EnableDPIAwareness()
 
 	if *showVer {
 		fmt.Printf("ssh-proxy %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
@@ -101,6 +107,7 @@ func main() {
 		go openUI(appURL)
 	}
 
+	api.Version = version
 	srv := &http.Server{
 		Handler:           api.New(appMgr, embeddedWeb),
 		ReadHeaderTimeout: 10 * time.Second,

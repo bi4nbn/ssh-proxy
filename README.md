@@ -38,7 +38,7 @@
 - 单击 / 双击托盘图标 → 重新打开界面；右键 → 菜单（打开界面 / 连接 / 断开 / 退出）
 - 托盘图标鼠标悬停会显示当前状态，例如「已连接 root@192.168.1.10」
 - **退出程序**：右键托盘图标 → 退出（所有监听端口随之释放）
-- 从终端启动时会保留控制台窗口方便看日志；双击启动时自动隐藏，做到后台静默运行
+- 从终端启动时会挂到父控制台，日志照常打印；双击启动时没有任何控制台窗口，直接出界面
 
 ### 命令行参数
 
@@ -100,10 +100,10 @@ internal/socks/             SOCKS5 服务端（仅 CONNECT，无认证）
 internal/api/               HTTP 接口 + SSE 实时推送 + 静态资源
 internal/winapp/            Win32 外壳：系统托盘、窗口图标接管、最小化到托盘
 web/                        界面（原生 HTML/CSS/JS，编译时内嵌进 exe）
-assets/icon-256.png         图标源图
-build/app.ico               生成的多尺寸图标
+assets/icon-256.png         图标母版（另含官方逐尺寸 icon-16/24/32/48.png）
+build/app.ico               生成的多尺寸图标（16~64 全尺寸 + 72/80/96/128/256）
 rsrc_windows_amd64.syso     Windows 图标 + 版本信息资源（go build 自动链接）
-tools/mkico/                PNG -> 多尺寸 ICO
+tools/mkico/                PNG -> 多尺寸 ICO（裁透明边 + 面积平均缩放）
 tools/icoinfo/              解析 ICO 并导出各尺寸 PNG（校验用）
 tools/checkicon/            检查 exe 内图标/版本资源是否真的嵌入
 tools/testserver/           本地测试用 SSH 服务端（非发布产物）
@@ -112,32 +112,47 @@ tools/testserver/           本地测试用 SSH 服务端（非发布产物）
 ## 自行编译
 
 ```bash
-go build -o ssh-proxy.exe .          # 生成单文件 exe（界面已内嵌）
+# 单文件 exe（界面已内嵌，GUI 子系统 —— 双击不弹黑窗）
+go build -ldflags "-H windowsgui -s -w" -o ssh-proxy.exe .
 go build -o testserver.exe ./tools/testserver   # 可选：本地测试服务端
 ```
 
 依赖仅 `golang.org/x/crypto`，无需 CGO，可交叉编译到 macOS / Linux。
 
+> `-H windowsgui` 让程序以 GUI 子系统启动，双击不会出现黑色控制台窗口。
+> 从 cmd / PowerShell 启动时会自动 `AttachConsole` 到父控制台，日志照常打印。
+
 ### 图标与版本信息
 
 exe 的图标由 `rsrc_windows_amd64.syso`（Windows 资源对象文件）提供，`go build` 会自动链接它。
-图标源图是 `assets/icon-256.png`，重新生成资源：
+图标源图放在 `assets/`（`icon-256.png` 母版 + 官方逐尺寸 `icon-16/24/32/48.png`），重新生成资源：
 
 ```bash
-go run ./tools/mkico assets/icon-256.png build/app.ico      # 生成多尺寸 ico
+go run ./tools/mkico --dir assets build/app.ico             # 生成多尺寸 ico（推荐）
+go run ./tools/mkico assets/icon-256.png build/app.ico      # 只有一张母版时用这个
 go run ./tools/mkico --png assets/icon-256.png web          # 导出网页 favicon
 go run github.com/tc-hib/go-winres@latest simply ^
   --arch amd64 --icon build/app.ico --manifest gui ^
   --product-name "SSH Proxy" --file-description "SSH 代理工具（图形界面）" ^
-  --file-version 1.0.0.0 --product-version 1.0.0.0 ^
+  --file-version 1.1.1.0 --product-version 1.1.1.0 ^
   --original-filename ssh-proxy.exe --out rsrc               # 生成 syso
-go build -o ssh-proxy.exe .                                 # 重新编译
-go run ./tools/checkicon ssh-proxy.exe                      # 校验资源是否嵌入
+go build -ldflags "-H windowsgui -s -w" -o ssh-proxy.exe .    # 重新编译（GUI 子系统，无黑窗）
+go run ./tools/checkicon ssh-proxy.exe                       # 校验资源是否嵌入
 ```
 
-应用窗口本身是 Chrome/Edge 的 app 窗口，默认会用网页 favicon 当图标（缩放到任务栏尺寸会发虚）。
-程序启动后会把窗口图标 **接管** 成 exe 内嵌的多尺寸 ICO（`WM_SETICON`），任务栏、Alt+Tab 都是清晰的图标；
-同时 `web/` 下也导出了 16/32/48/64/128 多档 favicon 作为兜底。
+### 任务栏图标为什么能保持锐利
+
+网页窗口（Chrome/Edge app 模式）默认拿 favicon 当图标，缩放到任务栏尺寸一定发虚。这里做了三件事：
+
+1. **接管窗口图标**：程序用 `WM_SETICON` 把窗口图标换成内嵌的多尺寸 ICO，并每 300ms 校验一次，
+   Chrome 用 favicon 覆盖后会被立刻抢回来。
+2. **按 DPI 精确供图**：进程启动时开启 Per-Monitor DPI 感知，按 `GetDpiForWindow` 算出任务栏
+   真正要画的像素尺寸（Win11 任务栏图标是 24 逻辑像素，150% 缩放即 36px），直接加载同尺寸图标，
+   Windows 不再插值放大。
+3. **ICO 预置全部尺寸并裁掉透明边**：`mkico` 会生成 16~64 每一个整数尺寸 + 72/80/96/128/256，
+   保证任何缩放比例都能命中"完全一致"的那张；同时裁掉官方图标四周约 10% 的透明边，
+   让图形铺满画布，视觉大小与 Chrome、微信等应用一致（否则会显得小一圈、发糊）。
+
 
 ## 已验证场景
 
@@ -145,3 +160,5 @@ go run ./tools/checkicon ssh-proxy.exe                      # 校验资源是否
 - 端口转发 `127.0.0.1:3080 -> 127.0.0.1:3080`（服务端 3080 服务可正常访问）
 - 私钥（ed25519）认证、严格指纹校验
 - 错误密码失败提示、断开后端口释放、服务端重启后自动重连
+- 150% 缩放（3840×2160 / DPI 144）下任务栏图标按 36px 原生渲染，与 Chrome、微信同等清晰
+- 双击启动无控制台窗口；最小化 / 关闭窗口后缩到托盘，隧道继续运行

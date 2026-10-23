@@ -19,6 +19,9 @@ import (
 	"sshproxy/internal/store"
 )
 
+// Version 由 main 在启动时注入，供 /api/meta 返回给界面显示。
+var Version = "dev"
+
 // Server 聚合 HTTP 路由。
 type Server struct {
 	m   *sshx.Manager
@@ -270,7 +273,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		"os":      runtime.GOOS,
 		"arch":    runtime.GOARCH,
 		"dataDir": s.m.Store().Dir(),
-		"version": "1.0.0",
+		"version": Version,
 	})
 }
 

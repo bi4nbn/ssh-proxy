@@ -31,6 +31,8 @@ type Options struct {
 }
 
 func HideOwnConsole()                            {}
+func AttachParentConsole() bool                  { return false }
+func EnableDPIAwareness()                        {}
 func MessageBox(title, text string)              {}
 func Start(opt Options, watchTitle string) error { return nil }
 func SetTooltip(tip string)                      {}

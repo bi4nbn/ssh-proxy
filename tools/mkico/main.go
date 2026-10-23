@@ -1,5 +1,10 @@
-// mkico 把一张 PNG 转成多尺寸 Windows ICO（16/24/32/48/64/128 用 BMP，256 用 PNG）。
-// 用法：go run ./tools/mkico assets/icon-256.png build/app.ico
+// mkico 把 PNG 转成多尺寸 Windows ICO（16/24/32/48/64/128 用 BMP，256 用 PNG）。
+//
+// 用法：
+//
+//	go run ./tools/mkico assets/icon-256.png build/app.ico
+//	go run ./tools/mkico --dir assets build/app.ico      # 优先用目录里的 icon-N.png 原图
+//	go run ./tools/mkico --png assets/icon-256.png web   # 导出网页 favicon
 package main
 
 import (
@@ -12,55 +17,147 @@ import (
 	"path/filepath"
 )
 
-var sizes = []int{16, 24, 32, 48, 64, 128, 256}
+// sizes 覆盖所有常见 DPI 缩放下的实际像素尺寸。
+// 任务栏图标是 24 逻辑像素（Win11）/32 逻辑像素（Win10），
+// 在 125%/150%/175%/200% 缩放下分别是 30/36/42/48 像素；
+// 只要 ICO 里存在"完全一致"的尺寸，LoadImage 就不会二次缩放，图标才够锐利。
+var sizes = func() []int {
+	list := make([]int, 0, 64)
+	for s := 16; s <= 64; s++ {
+		list = append(list, s)
+	}
+	return append(list, 72, 80, 96, 128, 256)
+}()
+
+// entry 是 ICO 里的一张图。
+type entry struct {
+	size int
+	data []byte
+}
 
 func main() {
-	// 用法：mkico <src.png> <dst.ico>
-	//       mkico --png <src.png> <输出目录>   把各尺寸导出为 PNG（网页 favicon 用）
 	if len(os.Args) >= 4 && os.Args[1] == "--png" {
 		dumpPNGs(os.Args[2], os.Args[3])
 		return
 	}
+	if len(os.Args) >= 4 && os.Args[1] == "--dir" {
+		buildFromDir(os.Args[2], os.Args[3])
+		return
+	}
 	if len(os.Args) < 3 {
 		fmt.Println("用法: mkico <src.png> <dst.ico>")
+		fmt.Println("      mkico --dir <assets目录> <dst.ico>")
 		fmt.Println("      mkico --png <src.png> <输出目录>")
 		os.Exit(1)
 	}
-	src := os.Args[1]
-	dst := os.Args[2]
+	buildFromPNG(os.Args[1], os.Args[2])
+}
 
-	f, err := os.Open(src)
-	if err != nil {
-		panic(err)
-	}
-	img, err := png.Decode(f)
-	f.Close()
-	if err != nil {
-		panic(err)
-	}
+// buildFromPNG 用一张母版图（裁掉透明边后）缩放出全部尺寸。
+func buildFromPNG(src, dst string) {
+	img := mustDecode(src)
 	if b := img.Bounds(); b.Dx() < 256 || b.Dy() < 256 {
 		fmt.Printf("提示: 源图仅 %dx%d，放大后可能发虚\n", b.Dx(), b.Dy())
 	}
-
-	type entry struct {
-		size int
-		data []byte
-	}
+	content := trim(img)
 	var entries []entry
 	for _, s := range sizes {
-		small := resize(img, s)
-		if s >= 256 {
-			var buf bytes.Buffer
-			if err := png.Encode(&buf, small); err != nil {
-				panic(err)
-			}
-			entries = append(entries, entry{s, buf.Bytes()})
+		entries = append(entries, makeEntry(s, resize(content, s)))
+	}
+	writeICO(dst, entries)
+}
+
+// buildFromDir 用目录里最大的那张图作为母版合成 ICO。
+//
+// 为什么不用官方逐尺寸的小图：Microsoft 打包的 Square44x44Logo 系列四周都留了
+// 约 10% 透明边（"plated" 版式），直接拿去做任务栏图标会比 Chrome/微信小一圈，
+// 看起来就像糊了。这里统一裁掉透明边、让图形铺满画布，再用面积平均缩放，
+// 小尺寸全部是"从大图缩小"，不会出现放大导致的发虚。
+func buildFromDir(dir, dst string) {
+	var master image.Image
+	masterSize := 0
+	found := 0
+	for _, s := range sizes {
+		img, err := tryDecode(filepath.Join(dir, fmt.Sprintf("icon-%d.png", s)))
+		if err != nil {
 			continue
 		}
-		entries = append(entries, entry{s, encodeBMP(small)})
+		found++
+		if b := img.Bounds(); b.Dx() >= masterSize {
+			master, masterSize = img, b.Dx()
+		}
 	}
+	if master == nil {
+		panic("目录里没有可用的 icon-N.png")
+	}
+	content := trim(master)
+	cb := content.Bounds()
+	fmt.Printf("目录内 %d 张原图，取 %dpx 作母版，裁边后 %dx%d\n", found, masterSize, cb.Dx(), cb.Dy())
 
-	// ICO 头部
+	var entries []entry
+	for _, s := range sizes {
+		entries = append(entries, makeEntry(s, resize(content, s)))
+	}
+	writeICO(dst, entries)
+}
+
+// trim 裁掉四周的透明边，让图形铺满整个画布。
+func trim(src image.Image) image.Image {
+	b := src.Bounds()
+	nrgba := toNRGBA(src)
+	minX, minY, maxX, maxY := b.Max.X, b.Max.Y, b.Min.X-1, b.Min.Y-1
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if nrgba.Pix[nrgba.PixOffset(x, y)+3] <= 16 {
+				continue
+			}
+			if x < minX {
+				minX = x
+			}
+			if x > maxX {
+				maxX = x
+			}
+			if y < minY {
+				minY = y
+			}
+			if y > maxY {
+				maxY = y
+			}
+		}
+	}
+	if maxX < minX || maxY < minY {
+		return nrgba
+	}
+	// 外扩 1px，保留边缘抗锯齿
+	if minX > b.Min.X {
+		minX--
+	}
+	if minY > b.Min.Y {
+		minY--
+	}
+	if maxX < b.Max.X-1 {
+		maxX++
+	}
+	if maxY < b.Max.Y-1 {
+		maxY++
+	}
+	return nrgba.SubImage(image.Rect(minX, minY, maxX+1, maxY+1))
+}
+
+// makeEntry 把一张图编码成 ICO 条目：>=256 用 PNG 压缩，其余用 32bpp BMP。
+func makeEntry(size int, img image.Image) entry {
+	if size >= 256 {
+		var buf bytes.Buffer
+		if err := png.Encode(&buf, toNRGBA(img)); err != nil {
+			panic(err)
+		}
+		return entry{size, buf.Bytes()}
+	}
+	return entry{size, encodeBMP(toNRGBA(img))}
+}
+
+// writeICO 按 ICO 规范写出文件。
+func writeICO(dst string, entries []entry) {
 	var out bytes.Buffer
 	_ = binary.Write(&out, binary.LittleEndian, uint16(0)) // reserved
 	_ = binary.Write(&out, binary.LittleEndian, uint16(1)) // type=icon
@@ -74,8 +171,8 @@ func main() {
 		}
 		out.WriteByte(w)                                        // width
 		out.WriteByte(w)                                        // height
-		out.WriteByte(0)                                        // palette
-		out.WriteByte(0)                                        // reserved
+		out.WriteByte(0)                                        // 调色板数
+		out.WriteByte(0)                                        // 保留
 		_ = binary.Write(&out, binary.LittleEndian, uint16(1))  // planes
 		_ = binary.Write(&out, binary.LittleEndian, uint16(32)) // bpp
 		_ = binary.Write(&out, binary.LittleEndian, uint32(len(e.data)))
@@ -92,17 +189,41 @@ func main() {
 	fmt.Printf("已生成 %s（%d 个尺寸，共 %d 字节）\n", dst, len(entries), out.Len())
 }
 
+func mustDecode(path string) image.Image {
+	img, err := tryDecode(path)
+	if err != nil {
+		panic(fmt.Sprintf("读取 %s 失败: %v", path, err))
+	}
+	return img
+}
+
+func tryDecode(path string) (image.Image, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return png.Decode(f)
+}
+
+// toNRGBA 把任意 image 统一成 NRGBA。
+func toNRGBA(src image.Image) *image.NRGBA {
+	if n, ok := src.(*image.NRGBA); ok {
+		return n
+	}
+	b := src.Bounds()
+	dst := image.NewNRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	for y := 0; y < b.Dy(); y++ {
+		for x := 0; x < b.Dx(); x++ {
+			dst.Set(x, y, src.At(b.Min.X+x, b.Min.Y+y))
+		}
+	}
+	return dst
+}
+
 // dumpPNGs 把源图按 favicon 常用尺寸导出为 PNG。
 func dumpPNGs(src, outDir string) {
-	f, err := os.Open(src)
-	if err != nil {
-		panic(err)
-	}
-	img, err := png.Decode(f)
-	f.Close()
-	if err != nil {
-		panic(err)
-	}
+	img := trim(mustDecode(src))
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		panic(err)
 	}
@@ -127,6 +248,9 @@ func resize(src image.Image, size int) *image.NRGBA {
 	sb := src.Bounds()
 	sw, sh := sb.Dx(), sb.Dy()
 	dst := image.NewNRGBA(image.Rect(0, 0, size, size))
+	if sw == size && sh == size {
+		return toNRGBA(src)
+	}
 	scaleX := float64(sw) / float64(size)
 	scaleY := float64(sh) / float64(size)
 
