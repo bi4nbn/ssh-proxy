@@ -158,7 +158,7 @@ go run ./tools/mkico --png assets/icon-256.png web          # 导出网页 favic
 go run github.com/tc-hib/go-winres@latest simply ^
   --arch amd64 --icon build/app.ico --manifest gui ^
   --product-name "SSH Proxy" --file-description "SSH 代理工具（图形界面）" ^
-  --file-version 1.1.3.0 --product-version 1.1.3.0 ^
+  --file-version 1.1.4.0 --product-version 1.1.4.0 ^
   --original-filename ssh-proxy.exe --out rsrc               # 生成 syso
 go build -ldflags "-H windowsgui -s -w" -o ssh-proxy.exe .    # 重新编译（GUI 子系统，无黑窗）
 go run ./tools/checkicon ssh-proxy.exe                       # 校验资源是否嵌入

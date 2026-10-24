@@ -445,7 +445,7 @@ func wndProc(hwnd syscall.Handle, msg uint32, wparam, lparam uintptr) uintptr {
 			showMenu(hwnd)
 		case wmLButtonUp, wmLButtonDblClk:
 			if trayOpts.OnOpen != nil {
-				go trayOpts.OnOpen()
+				trayOpts.OnOpen()
 			}
 		}
 		return 0

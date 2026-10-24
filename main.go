@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"sshproxy/internal/api"
@@ -34,10 +35,13 @@ var embeddedWeb embed.FS
 //go:embed build/app.ico
 var appIconICO []byte
 
-var version = "1.1.3"
+var version = "1.1.4"
 
 // winTitle 必须与网页 <title> 完全一致，用于找到并接管应用窗口。
 const winTitle = "SSH Proxy · SSH 代理工具"
+
+// uiMu 保护 openUI，防止并发启动多个浏览器窗口。
+var uiMu sync.Mutex
 
 // instanceMutex 是全局单实例锁的名字（winapp 内部会加 Global\/Local\ 前缀）。
 const instanceMutex = "SSHProxy.SingleInstance"
@@ -448,11 +452,14 @@ func printBanner(url, dir string) {
 }
 
 // openUI 优先唤起已存在的窗口，其次用 Edge/Chrome 的应用模式新开一个。
+// 内部有互斥锁保护，并发调用（如用户狂点托盘图标）不会弹出多个窗口。
 func openUI(url string) {
+	uiMu.Lock()
+	defer uiMu.Unlock()
+
 	if winapp.FocusExisting(winTitle) {
 		return
 	}
-	time.Sleep(300 * time.Millisecond)
 	candidates := []string{
 		filepath.Join(os.Getenv("ProgramFiles(x86)"), `Microsoft\Edge\Application\msedge.exe`),
 		filepath.Join(os.Getenv("ProgramFiles"), `Microsoft\Edge\Application\msedge.exe`),
@@ -477,6 +484,13 @@ func openUI(url string) {
 		)
 		if err := cmd.Start(); err == nil {
 			appLog.Printf("已启动界面进程 pid=%d", cmd.Process.Pid)
+			// 等窗口真正出现再释放锁，防止后续调用误判为"还没窗口"而重复启动
+			for i := 0; i < 20; i++ {
+				time.Sleep(100 * time.Millisecond)
+				if winapp.FocusExisting(winTitle) {
+					return
+				}
+			}
 			return
 		}
 	}
